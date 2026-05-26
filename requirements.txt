@@ -1,8 +1,1 @@
-
-scapy>=2.4.5
-
-
-mitmproxy>=9.0.0
-
-
-dpkt>=1.9.8
+# None
