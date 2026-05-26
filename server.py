@@ -1,63 +1,100 @@
+#!/usr/bin/env python3
 import socket
 import threading
-from queue import Queue
+import time
 
-def handle_client(client_sock, target_host, target_port):
-    # Подключаемся к цели
-    target = socket.create_connection((target_host, target_port))
-    
-    # Очереди для буферизации
-    to_target = Queue()
-    to_client = Queue()
-    
-    def reader(src, dst_queue, dst_sock=None):
+def safe_send(sock, data):
+    if not data or sock is None:
+        return
+    try:
+        sock.send(data)
+    except (BrokenPipeError, ConnectionResetError, OSError, AttributeError):
+        pass
+
+def handle_client(client_sock, addr, target_host, target_port):
+    try:
+        target = socket.create_connection((target_host, target_port), timeout=10)
+    except Exception:
+        safe_send(client_sock, b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+        client_sock.close()
+        return
+
+    try:
+        # Принимаем данные от клиента
+        first_chunk = b''
+        second_chunk = b''
+        
+        client_sock.settimeout(5.0)
+        try:
+            first_chunk = client_sock.recv(500)
+            second_chunk = client_sock.recv(4096)
+        except socket.timeout:
+            pass
+        
+        # Склеиваем и отправляем цели
+        full_request = first_chunk + second_chunk
+        if full_request:
+            target.send(full_request)
+        
+        # Получаем ответ
+        response = b''
         while True:
-            data = src.recv(4096)
-            if not data:
+            try:
+                chunk = target.recv(8192)
+                if not chunk:
+                    break
+                response += chunk
+            except socket.timeout:
                 break
-            dst_queue.put(data)
-            if dst_sock:
-                # Вторая часть — отложенная отправка
-                pass
-        dst_queue.put(None)
-    
-    def writer(src_queue, dst_sock, delay=0):
-        while True:
-            data = src_queue.get()
-            if data is None:
+            except:
                 break
-            # Имитация раздельной обработки — задержка между частями
-            if delay:
-                threading.Event().wait(delay)
-            dst_sock.send(data)
-    
-    # Читаем от клиента, делим на 2 части
-    first_part = client_sock.recv(2048)  # Первая половина
-    second_part = client_sock.recv(2048) # Вторая половина
-    
-    # Обрабатываем отдельно
-    processed_first = first_part.upper()  # Твоя логика
-    processed_second = second_part.lower()
-    
-    # Склеиваем и отправляем цели
-    target.send(processed_first + processed_second)
-    
-    # Ответ от цели — тоже разделяем
-    resp = target.recv(4096)
-    mid = len(resp)//2
-    client_sock.send(resp[:mid])
-    threading.Event().wait(0.5)  # разрыв
-    client_sock.send(resp[mid:])
-    
-    target.close()
-    client_sock.close()
+        
+        target.close()
+        
+        if not response:
+            client_sock.close()
+            return
+        
+        # Разделяем ответ на две части
+        mid = len(response) // 2
+        
+        # Отправляем с защитой от разрыва
+        safe_send(client_sock, response[:mid])
+        time.sleep(0.3)  # задержка между частями
+        safe_send(client_sock, response[mid:])
+        
+    except Exception:
+        pass
+    finally:
+        try:
+            client_sock.close()
+        except:
+            pass
 
-# Запуск
-sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-sock.bind(('0.0.0.0', 8888))
-sock.listen(50)
+def main():
+    HOST = '0.0.0.0'
+    PORT = 8888
+    TARGET_HOST = 'example.com'  # поменяй на нужный
+    TARGET_PORT = 80
+    
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((HOST, PORT))
+    server.listen(100)
+    print(f"Прокси на {HOST}:{PORT} -> {TARGET_HOST}:{TARGET_PORT}")
+    
+    while True:
+        try:
+            client, addr = server.accept()
+            t = threading.Thread(target=handle_client, args=(client, addr, TARGET_HOST, TARGET_PORT))
+            t.daemon = True
+            t.start()
+        except KeyboardInterrupt:
+            break
+        except:
+            continue
+    
+    server.close()
 
-while True:
-    client, addr = sock.accept()
-    t = threading.Thread(target=handle_client, args=(client, 'example.com', 80))
-    t.start()
+if __name__ == '__main__':
+    main()
