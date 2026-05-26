@@ -2,6 +2,7 @@
 import socket
 import threading
 import time
+import sys
 
 def safe_send(sock, data):
     if not data or sock is None:
@@ -14,30 +15,33 @@ def safe_send(sock, data):
 def handle_client(client_sock, addr, target_host, target_port):
     try:
         target = socket.create_connection((target_host, target_port), timeout=10)
-    except Exception:
+    except Exception as e:
         safe_send(client_sock, b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
         client_sock.close()
         return
 
     try:
-        # Принимаем данные от клиента
-        first_chunk = b''
-        second_chunk = b''
-        
         client_sock.settimeout(5.0)
+        full_request = b''
         try:
-            first_chunk = client_sock.recv(500)
-            second_chunk = client_sock.recv(4096)
+            while True:
+                chunk = client_sock.recv(4096)
+                if not chunk:
+                    break
+                full_request += chunk
+                if len(chunk) < 4096:
+                    break
         except socket.timeout:
             pass
+        except:
+            pass
         
-        # Склеиваем и отправляем цели
-        full_request = first_chunk + second_chunk
         if full_request:
             target.send(full_request)
         
-        # Получаем ответ
+        # Получаем ответ целиком
         response = b''
+        target.settimeout(10.0)
         while True:
             try:
                 chunk = target.recv(8192)
@@ -55,15 +59,11 @@ def handle_client(client_sock, addr, target_host, target_port):
             client_sock.close()
             return
         
-        # Разделяем ответ на две части
-        mid = len(response) // 2
+        # *** ГЛАВНОЕ: отправляем ВЕСЬ ответ целиком, без разделения ***
+        # Render не любит задержки между частями ответа
+        safe_send(client_sock, response)
         
-        # Отправляем с защитой от разрыва
-        safe_send(client_sock, response[:mid])
-        time.sleep(0.3)  # задержка между частями
-        safe_send(client_sock, response[mid:])
-        
-    except Exception:
+    except Exception as e:
         pass
     finally:
         try:
@@ -73,15 +73,15 @@ def handle_client(client_sock, addr, target_host, target_port):
 
 def main():
     HOST = '0.0.0.0'
-    PORT = 8888
-    TARGET_HOST = 'example.com'  # поменяй на нужный
+    PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8888
+    TARGET_HOST = 'example.com'  # ЗАМЕНИ НА СВОЙ
     TARGET_PORT = 80
     
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((HOST, PORT))
     server.listen(100)
-    print(f"Прокси на {HOST}:{PORT} -> {TARGET_HOST}:{TARGET_PORT}")
+    print(f"Прокси на {HOST}:{PORT} -> {TARGET_HOST}:{TARGET_PORT}", flush=True)
     
     while True:
         try:
